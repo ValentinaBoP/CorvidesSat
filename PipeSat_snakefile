@@ -1,0 +1,294 @@
+##########################################################################
+# 1) Extract flanking regions to the gaps                                #
+# 2) Repeat prediction (without manual curation) on the flanking         #
+# regions                                                                #
+#                                                                        #                  
+# 3) Align consensus sequences to the reference genome                   #
+#                                                                        #
+# Written by Valentina Peona and Verena Kutschera                        #
+# Aug. 2019 (valentina.peona@ebc.uu.se)                                  #
+##########################################################################
+
+
+##########################################################################
+########################### WORKFLOW VARIABLES ###########################
+##########################################################################
+
+########################### REFERENCE ASSEMBLY ###########################
+########################### (EDITING REQUIRED) ###########################
+
+# Edit variables according to assembly version to be analyzed:
+# for a given assembly version, uncomment and fill out variables
+
+### Reference genome 
+# full genome assembly
+REF_DIR       = "/home/vpeona/snic2018-8-266/private/Valentina/test/Genomes/" # directory containing reference assembly
+REF_NAME      = "parRag" # file name without file extension
+REF_PATH      = REF_DIR + REF_NAME + ".fasta" # modify file extension if necessary
+
+
+############################ OTHER VARIABLES ############################
+########################### (EDITING REQUIRED) ##########################
+
+### Directories
+OUT_DIR       = "/home/vpeona/snic2018-8-266/private/Valentina/test/" + REF_NAME + "/"
+SCRIPT_DIR    = "/home/vpeona/snic2018-8-266/private/Valentina/test/Scripts/"
+
+### 1) Flanking regions
+FLANK         = 2000
+
+### 2) Repeat prediction
+REP_DB        = REF_NAME + "_" + str(FLANK)
+
+### 3) MAFFT and T-Coffee alignment
+HOME_DIR      = "/home/vpeona"
+
+
+
+##########################################################################
+############################ RUN THE WORKFLOW ############################
+##########################################################################
+
+### Move into the directory on UPPMAX: 
+# cd /path/to/wabi/snakemake_maker_workflow_dataprep
+
+### Check that all required files are present:
+# cluster configuration file:         cluster.json
+# bash script to start the workflow:  run_maker_workflow.sh 
+# the Snakefile (this file):          Snakefile
+
+### Edit the bash script, e.g. for a dry run, the main run or any optional analysis
+# ./run_maker_workflow.sh
+
+
+##########################################################################
+############################ SNAKEMAKE RULES #############################
+######################### (NO EDITING REQUIRED) #########################
+##########################################################################
+
+def get_filenames():
+  import re
+  import os
+  align = list()
+  dir = OUT_DIR + "aligned/"
+  for file in os.listdir(dir):
+    if(re.search("rnd-[0-9]+_family-[0-9]+.fa",file)):
+      align.append(file)
+  return align
+
+localrules: ref_upper, ref_index, ref_BLASTDB
+
+rule all:
+    input:
+        OUT_DIR_ALIGN = OUT_DIR + "gaps95/runTCoffee_done"
+
+#"{outdir}/gaps95/"
+# snakemake /new/genome/directory/gaps9
+
+### 0) Pre-processing of the fasta file: index, BLAST database, to uppercase
+
+rule ref_upper:
+    """Reference assembly file preparation for RepeatModeler and RepeatMasker: change all lowercase bases to uppercase"""
+    input:
+        reference = REF_PATH
+    output:
+        ref_upper = OUT_DIR + REF_NAME + ".upper.fasta"
+    params:
+        dir = REF_DIR,
+        outdir = OUT_DIR
+    threads: 1
+    shell:
+        """
+        awk '{{ if ($0 !~ />/) {{print toupper($0)}} else {{print $0}} }}' {input.reference} > {output.ref_upper}
+        """
+
+rule ref_index:
+    """Create index file for the reference genome"""
+    input:
+        reference = rules.ref_upper.output
+    output:
+        index = OUT_DIR + REF_NAME + ".upper.fasta.fai"
+    params:
+        dir = OUT_DIR
+    shell:
+      """
+      module load bioinfo-tools samtools/1.9
+      samtools faidx {input.reference}
+      """
+  
+rule ref_BLASTDB:
+    """
+    Create BLAST database for the reference
+    """
+    input:
+        reference = rules.ref_upper.output
+    output:
+        blast_nhr = OUT_DIR + REF_NAME + ".upper.fasta.nhr",
+        blast_nin = OUT_DIR + REF_NAME + ".upper.fasta.nin",
+        blast_nog = OUT_DIR + REF_NAME + ".upper.fasta.nog",
+        blast_nsd = OUT_DIR + REF_NAME + ".upper.fasta.nsd",
+        blast_nsi = OUT_DIR + REF_NAME + ".upper.fasta.nsi",
+        blast_nsq = OUT_DIR + REF_NAME + ".upper.fasta.nsq"
+    params:
+        dir = OUT_DIR
+    shell:
+        """
+        module load bioinfo-tools blast/2.7.1+
+        makeblastdb -in {input.reference} -out {input.reference} -dbtype nucl -parse_seqids
+        """
+
+### 1) Extract flanking regions to the gaps
+
+rule get_flanks:
+    input:
+        reference = rules.ref_upper.output,
+        index = rules.ref_index.output,
+        blast = OUT_DIR + REF_NAME + ".upper.fasta.nhr"
+    params:
+        dir = OUT_DIR,
+        flank = FLANK,
+        script_dir = SCRIPT_DIR
+    output:
+        flank_fasta = OUT_DIR + REF_NAME + ".upper.fasta.flanks.fasta",
+        fixed_bed = temporary("temp_fixed.bed")
+    shell:
+        """
+        cd {params.dir}
+        module purge
+        module load R_packages/3.5.0
+        Rscript --vanilla {params.script_dir}satellite_pipeline_setup.R {input.reference} {params.flank} {output.flank_fasta}
+        """
+# the getFlanks.py does not exist yet
+
+### 2) Run RepeatModeler
+
+rule repeatmodeler:
+    """RepeatModeler for de novo repeat prediction from a reference assembly. Repeat library needed as input for MAKER.
+    For final assembly, curate de novo predicted repeats manually before merging with the bird library."""
+    input:
+        flank_fasta = rules.get_flanks.output
+    output:
+        RMDL_consensi = OUT_DIR + "consensi.fa.classified"
+    params:
+        dir = OUT_DIR,
+        database = REP_DB
+    log: OUT_DIR + "RMDL.log"
+    threads: 4
+    shell:
+        """
+        cd {params.dir}
+        module load bioinfo-tools RepeatModeler/1.0.8_RM4.0.7
+
+        # Build repeat database
+        BuildDatabase -engine ncbi -name {params.database} {input.flank_fasta} &&
+
+        # Run RepeatModeler
+        RepeatModeler -engine ncbi -pa 4 -database {params.database} >& {log} &&
+        
+        # copy the output file to a new directory
+        cp RM_*.*/consensi.fa.classified ./
+        """
+        
+### 3) Run RepeatModelerPipeline4.pl
+rule runRMDLPipeline_awk:
+      input:
+          ref_upper = rules.ref_upper.output,
+          consensi = rules.repeatmodeler.output
+      output:
+          clean = OUT_DIR + "consensi.fa.classified.clean"
+      params:
+          dir = OUT_DIR
+      shell:
+          """
+          awk '{{print $1}}' {input.consensi} > {output.clean}
+          """
+          
+rule runRMDLPipeline_sed:
+      input:
+          clean = rules.runRMDLPipeline_awk.output
+      output:
+          clean_sed = OUT_DIR + "consensi.fa.classified.clean2"
+      params:
+          dir = OUT_DIR
+      shell:
+          """
+          sed 's|/|_|g' {input.clean} > temp.fa
+          mv temp.fa {output.clean_sed}
+          """
+
+rule runRMDLPipeline_perl:
+    """Run the RepeatModelerPipeline4.pl Perl script to align the consensus sequences generated before back to the reference genome and produce MAFFT alignments out of the best 20 hits"""
+    input:
+        ref_upper = rules.ref_upper.output,
+        consensi = rules.runRMDLPipeline_sed.output
+    output:
+        alignments = OUT_DIR + "runRMDLPipeline_perl_done"
+    params:
+        dir = OUT_DIR,
+        script_dir = SCRIPT_DIR
+    threads: 4
+    shell:
+        """
+        module load bioinfo-tools
+        module load blast/2.7.1+
+        module load MAFFT/7.310
+        #unset $MAFFT_BINARIES
+        
+        cd {params.dir}
+
+        perl {params.script_dir}repeatModelerPipeline4.pl {input.ref_upper} {input.ref_upper} {input.consensi}
+        
+        rm *emp.out
+        
+        touch runRMDLPipeline_perl_done
+        """
+
+rule postRMDLPipeline:
+    input:
+        alignments = OUT_DIR + "runRMDLPipeline_perl_done"
+    output:
+        final = OUT_DIR + "final/postRMDLPipeline_done"
+    params:
+        dir = OUT_DIR
+    threads: 2
+    shell:
+        """
+        cd {params.dir}
+        
+        cd aligned
+        
+        ls *.fa > list_fasta
+        for i in $( cat list_fasta )
+        do
+        name=`ls ${{i}} | cut -f1 -d "."`; cat ${{i}} | perl -ne 'chomp;s/>\s+/>/;if(/>(\S+)/){{${{id}}{{$1}}++;${{id2}}=$1;}}if(${{id}}{{${{id2}}}}==1){{print "$_\\n"}}' > ../final/${{name}}.fa
+        done
+        
+        touch {output.final}
+        """
+        
+rule runTCoffee:
+    input:
+        alignments = OUT_DIR + "final/postRMDLPipeline_done"
+    output:
+        OUT_DIR_ALIGN = OUT_DIR + "gaps95/runTCoffee_done"
+    params:
+        home = HOME_DIR,
+        final = directory(OUT_DIR + "final/"),
+        gaps = OUT_DIR + "gaps95/"
+    threads: 2
+    shell:
+        """
+        module purge
+        module load bioinfo-tools T-Coffee/11.00.8cbe486
+        export CACHE_4_TCOFFEE={params.home}
+        cd {params.final}
+        
+        ls *.fa > list_fasta
+        
+        for i in $( cat list_fasta )
+        do
+        name=`ls ${{i}} | cut -f1 -d "."`; t_coffee -other_pg seq_reformat -in ${{i}} -action +rm_gap 95 > {params.gaps}${{name}}.gaps95.fa
+        done
+        
+        touch {output.OUT_DIR_ALIGN}
+        """

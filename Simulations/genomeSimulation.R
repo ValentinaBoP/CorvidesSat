@@ -1,3 +1,6 @@
+# Usage: Rscript --vanilla genomeSimulation.R genome.fasta genome.fasta.fai sat.lib <perc of sat> <prefix>
+# it requires BEDtools and samtools
+
 args = commandArgs(trailingOnly=TRUE)
 
 # test if there is at least one argument: if not, return an error
